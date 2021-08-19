@@ -197,6 +197,7 @@
     FT_Error   error;
     FT_Memory  memory;
     FT_Stream  stream = NULL;
+    FT_UInt    mode;
 
 
     *astream = NULL;
@@ -208,15 +209,15 @@
       return FT_THROW( Invalid_Argument );
 
     memory = library->memory;
+    mode   = args->flags &
+               ( FT_OPEN_MEMORY | FT_OPEN_STREAM | FT_OPEN_PATHNAME );
 
-    if ( FT_NEW( stream ) )
-      goto Exit;
-
-    stream->memory = memory;
-
-    if ( args->flags & FT_OPEN_MEMORY )
+    if ( mode == FT_OPEN_MEMORY )
     {
       /* create a memory-based stream */
+      if ( FT_NEW( stream ) )
+        goto Exit;
+
       FT_Stream_OpenMemory( stream,
                             (const FT_Byte*)args->memory_base,
                             (FT_ULong)args->memory_size );
@@ -224,33 +225,40 @@
 
 #ifndef FT_CONFIG_OPTION_DISABLE_STREAM_SUPPORT
 
-    else if ( args->flags & FT_OPEN_PATHNAME )
+    else if ( mode == FT_OPEN_PATHNAME )
     {
       /* create a normal system stream */
+      if ( FT_NEW( stream ) )
+        goto Exit;
+
       error = FT_Stream_Open( stream, args->pathname );
-      stream->pathname.pointer = args->pathname;
+      if ( error )
+        FT_FREE( stream );
     }
-    else if ( ( args->flags & FT_OPEN_STREAM ) && args->stream )
+    else if ( ( mode == FT_OPEN_STREAM ) && args->stream )
     {
       /* use an existing, user-provided stream */
 
       /* in this case, we do not need to allocate a new stream object */
       /* since the caller is responsible for closing it himself       */
-      FT_FREE( stream );
       stream = args->stream;
+      error  = FT_Err_Ok;
     }
 
 #endif
 
     else
+    {
       error = FT_THROW( Invalid_Argument );
+      if ( ( args->flags & FT_OPEN_STREAM ) && args->stream )
+        FT_Stream_Close( args->stream );
+    }
 
-    if ( error )
-      FT_FREE( stream );
-    else
-      stream->memory = memory;  /* just to be certain */
-
-    *astream = stream;
+    if ( !error )
+    {
+      stream->memory = memory;
+      *astream       = stream;
+    }
 
   Exit:
     return error;
@@ -3124,10 +3132,12 @@
   }
 
 
-  FT_BASE_DEF( void )
+  FT_BASE_DEF( FT_Error )
   FT_Request_Metrics( FT_Face          face,
                       FT_Size_Request  req )
   {
+    FT_Error  error = FT_Err_Ok;
+
     FT_Size_Metrics*  metrics;
 
 
@@ -3218,8 +3228,18 @@
         scaled_h = FT_MulFix( face->units_per_EM, metrics->y_scale );
       }
 
-      metrics->x_ppem = (FT_UShort)( ( scaled_w + 32 ) >> 6 );
-      metrics->y_ppem = (FT_UShort)( ( scaled_h + 32 ) >> 6 );
+      scaled_w = ( scaled_w + 32 ) >> 6;
+      scaled_h = ( scaled_h + 32 ) >> 6;
+      if ( scaled_w > FT_USHORT_MAX ||
+           scaled_h > FT_USHORT_MAX )
+      {
+        FT_ERROR(( "FT_Request_Metrics: Resulting ppem size too large\n" ));
+        error = FT_ERR( Invalid_Pixel_Size );
+        goto Exit;
+      }
+
+      metrics->x_ppem = (FT_UShort)scaled_w;
+      metrics->y_ppem = (FT_UShort)scaled_h;
 
       ft_recompute_scaled_metrics( face, metrics );
     }
@@ -3229,6 +3249,9 @@
       metrics->x_scale = 1L << 16;
       metrics->y_scale = 1L << 16;
     }
+
+  Exit:
+    return error;
   }
 
 
@@ -3292,7 +3315,7 @@
   FT_Request_Size( FT_Face          face,
                    FT_Size_Request  req )
   {
-    FT_Error         error = FT_Err_Ok;
+    FT_Error         error;
     FT_Driver_Class  clazz;
     FT_ULong         strike_index;
 
@@ -3328,13 +3351,15 @@
        */
       error = FT_Match_Size( face, req, 0, &strike_index );
       if ( error )
-        return error;
+        goto Exit;
 
       return FT_Select_Size( face, (FT_Int)strike_index );
     }
     else
     {
-      FT_Request_Metrics( face, req );
+      error = FT_Request_Metrics( face, req );
+      if ( error )
+        goto Exit;
 
       FT_TRACE5(( "FT_Request_Size:\n" ));
     }
@@ -3357,6 +3382,7 @@
     }
 #endif
 
+  Exit:
     return error;
   }
 
@@ -5626,6 +5652,35 @@
                                          base_glyph,
                                          root_transform,
                                          paint );
+    else
+      return 0;
+  }
+
+
+  /* documentation is in ftcolor.h */
+
+  FT_EXPORT_DEF( FT_Bool )
+  FT_Get_Color_Glyph_ClipBox( FT_Face      face,
+                              FT_UInt      base_glyph,
+                              FT_ClipBox*  clip_box )
+  {
+    TT_Face       ttface;
+    SFNT_Service  sfnt;
+
+
+    if ( !face || !clip_box )
+      return 0;
+
+    if ( !FT_IS_SFNT( face ) )
+      return 0;
+
+    ttface = (TT_Face)face;
+    sfnt   = (SFNT_Service)ttface->sfnt;
+
+    if ( sfnt->get_color_glyph_clipbox )
+      return sfnt->get_color_glyph_clipbox( ttface,
+                                            base_glyph,
+                                            clip_box );
     else
       return 0;
   }
